@@ -1,0 +1,223 @@
+#!/usr/bin/env python3.6
+
+# Monitor a Tripp Lite UPS for power off and immenent battery exhaustion.
+# MUST be run as root
+
+# Tripp Lite HID handling copied from https://github.com/numat/tripplite
+
+import argparse
+import logging
+from logging import FileHandler
+import os
+import sys
+import time
+
+import hid
+
+log = logging.getLogger("UPS")
+
+# All Tripp Lite UPSs have this vendor id
+VENDOR_ID = 0x09ae
+SHUTDOWN_CMD = "/sbin/shutdown -p +30s UPS Battery Failing"
+BATTERY_OK = 10     # Shut down if less than this % of battery remains
+EMPTY_OK = 600      # Shut down if less than this # of seconds of runtime remains
+
+# NOTE: Due to inconsistent responses from the UPS some or all of these may fail
+structure = {
+    'config': {
+        'voltage': {
+            'address': 48,
+            'bytes': 1,
+            'format': 'i'
+        },
+        'frequency': {
+            'address': 2,
+            'bytes': 1,
+            'format': 'i'
+        },
+        'power': {
+            'address': 3,
+            'bytes': 2,
+            'format': 'i'
+        }
+    },
+    'status': {
+        'address': 50,
+        'bytes': 1,
+        'format': 'b',
+        'keys': [
+            'shutdown imminent',
+            'ac present',
+            'charging',
+            'discharging',
+            'needs replacement',
+            'below remaining capacity',
+            'fully charged',
+            'fully discharged'
+        ]
+    },
+    'input': {
+        'voltage': {
+            'address': 24,
+            'bytes': 2,
+            'format': 'f'
+        },
+        'frequency': {
+            'address': 25,
+            'bytes': 2,
+            'format': 'f'
+        }
+    },
+    'output': {
+        'voltage': {
+            'address': 27,
+            'bytes': 2,
+            'format': 'f'
+        },
+        'power': {
+            'address': 71,
+            'bytes': 2,
+            'format': 'i'
+        }
+    },
+    'health': {
+        'address': 52,
+        'bytes': 1,
+        'format': 'i'
+    },
+    'time to empty': {
+        'address': 53,
+        'bytes': 2,
+        'format': 'i'
+    }
+}
+
+
+class Battery(object):
+    """Driver for TrippLite UPS battery backups."""
+
+    def __init__(self, product_id=None):
+        """Connect to the device.
+
+        Args:
+            product_id (Optional): The HID product ID of the UPS. Only needed
+                if multiple TrippLite HID devices are connected.
+        """
+        self.device = hid.device()
+        self.product_id = product_id or self._get_product_id()
+
+    def __enter__(self):
+        """Provide entrance to context manager."""
+        self.open()
+        return self
+
+    def __exit__(self, *args):
+        """Provide exit to context manager."""
+        self.close()
+
+    def open(self):
+        """Open connection to the device."""
+        self.device.open(VENDOR_ID, self.product_id)
+
+    def close(self):
+        """Close connection to the device."""
+        self.device.close()
+
+    def _get_product_id(self):
+        """Search through connected HID devices to find the TrippLite UPS.
+
+        This assumes that only one TrippLite is connected to the computer.
+        """
+        try:
+            return next(d['product_id'] for d in hid.enumerate()
+                        if d['vendor_id'] == VENDOR_ID)
+        except StopIteration:
+            raise IOError("Could not find any connected Tripp Lite devices.")
+
+    def get(self):
+        """Return an object containing all available data."""
+        output = {}
+        for category, data in structure.items():
+            try:
+                if 'address' in data:
+                    output[category] = self._read(data)
+                else:
+                    output[category] = {}
+                    for subcategory, options in data.items():
+                        output[category][subcategory] = self._read(options)
+            except IOError:
+                # Skip problem categories
+                continue
+        return output
+
+    def _read(self, options, retries=3):
+        """Read a HID report from the Tripp Lite connection.
+
+        This reads binary, one-byte ints, two-byte ints (little-endian),
+        and floats (little-endian two-byte ints, divided by 10). See the
+        TrippLite communication interface manual for more.
+        """
+        report = self.device.get_feature_report(options['address'],
+                                                options['bytes'] + 1)
+        if not report:
+            if retries > 0:
+                return self._read(options, retries - 1)
+            raise IOError("Did not receive data.")
+        if options['address'] != report[0]:
+            raise IOError("Received unexpected data.")
+        if options['format'] == 'b':
+            bits = '{:08b}'.format(report[1])[::-1]
+            return {k: bool(int(v)) for k, v in zip(options['keys'], bits)}
+        elif options['format'] == 'i' and options['bytes'] == 2:
+            return (report[2] << 8) + report[1]
+        elif options['format'] == 'i' and options['bytes'] == 1:
+            return report[1]
+        elif options['format'] == 'f':
+            return ((report[2] << 8) + report[1]) / 10.0
+
+def list_devices():
+    """List devices matching the VENDOR_ID"""
+    return list((d['product_string'], d['product_id']) for d in hid.enumerate() if d['vendor_id'] == VENDOR_ID)
+
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Monitor Tripp Lite UPS status.")
+    parser.add_argument('-l', '--list', action='store_true',
+                        help="List all devices and their product ids")
+    parser.add_argument('-p', '--product_id', type=int, default=None,
+                        help="The TrippLite UPS HID product id. Only needed "
+                        "if multiple TrippLite devices are connected.")
+    parser.add_argument('--log', default="/var/log/%s.log" % os.path.basename(sys.argv[0]))
+    args = parser.parse_args()
+
+    # Setup the logger, console is INFO and logfile is DEBUG messages
+    log.setLevel(logging.INFO)
+    fh = FileHandler(args.log)
+    fh.setLevel(logging.DEBUG)
+    formatter = logging.Formatter('%(asctime)s %(levelname)s: %(message)s')
+    fh.setFormatter(formatter)
+    log.addHandler(fh)
+
+    ups = Battery(args.product_id)
+    log.info("Starting UPS monitoring of 0x%04x:0x%04x - logs in %s", VENDOR_ID, ups.product_id, args.log)
+
+    while True:
+        status = ups.get()
+        if "input" in status and "voltage" in status["input"]:
+            if status["input"]["voltage"] == 0.0:
+                log.info("Input voltage is 0.0, checking battery")
+                if "health" in status:
+                    if status["health"] < BATTERY_OK:
+                        log.info("Battery at %d%%, shutting down.", status["health"])
+                        os.system(SHUTDOWN_CMD)
+                        sys.exit(1)
+                if "time to empty" in status:
+                    if status["time to empty"] < EMPTY_OK:
+                        log.info("Battery runtime estimate is at %d, shutting down.", status["time to empty"])
+                        os.system(SHUTDOWN_CMD)
+                        sys.exit(1)
+            time.sleep(30)
+
+if __name__ == '__main__':
+    main()
