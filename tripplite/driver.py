@@ -1,7 +1,8 @@
 """Driver for TrippLite UPS battery backups."""
 import hid
 
-vendor_id = 0x09ae
+# All Tripp Lite UPSs have this vendor id
+VENDOR_ID = 0x09ae
 
 structure = {
     'config': {
@@ -97,7 +98,7 @@ class Battery(object):
 
     def open(self):
         """Open connection to the device."""
-        self.device.open(vendor_id, self.product_id)
+        self.device.open(VENDOR_ID, self.product_id)
 
     def close(self):
         """Close connection to the device."""
@@ -110,24 +111,28 @@ class Battery(object):
         """
         try:
             return next(d['product_id'] for d in hid.enumerate()
-                        if d['vendor_id'] == vendor_id)
+                        if d['vendor_id'] == VENDOR_ID)
         except StopIteration:
-            raise IOError("Could not find any connected TrippLite devices.")
+            raise IOError("Could not find any connected Tripp Lite devices.")
 
     def get(self):
         """Return an object containing all available data."""
         output = {}
         for category, data in structure.items():
-            if 'address' in data:
-                output[category] = self._read(data)
-            else:
-                output[category] = {}
-                for subcategory, options in data.items():
-                    output[category][subcategory] = self._read(options)
+            try:
+                if 'address' in data:
+                    output[category] = self._read(data)
+                else:
+                    output[category] = {}
+                    for subcategory, options in data.items():
+                        output[category][subcategory] = self._read(options)
+            except IOError:
+                # Skip problem categories
+                continue
         return output
 
     def _read(self, options, retries=3):
-        """Read a HID report from the TrippLite connection.
+        """Read a HID report from the Tripp Lite connection.
 
         This reads binary, one-byte ints, two-byte ints (little-endian),
         and floats (little-endian two-byte ints, divided by 10). See the
@@ -150,3 +155,7 @@ class Battery(object):
             return report[1]
         elif options['format'] == 'f':
             return ((report[2] << 8) + report[1]) / 10.0
+
+def list_devices():
+    """List devices matching the VENDOR_ID"""
+    return list((d['product_string'], d['product_id']) for d in hid.enumerate() if d['vendor_id'] == VENDOR_ID)
