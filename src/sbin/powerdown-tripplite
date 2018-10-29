@@ -210,6 +210,12 @@ def main():
             if status["input"]["voltage"] == 0.0:
                 input_power = False
                 log.info("Input voltage is 0.0, checking battery")
+                if "output" in status and "power" in status["output"]:
+                    if "voltage" in status["output"]:
+                        output_volts = status["output"]["voltage"]
+                    else:
+                        output_volts = "Unknown"
+                    log.info("Load is %d watts @ %s volts", status["output"]["power"], output_volts)
                 if "health" in status:
                     log.info("health = %d%%", status["health"])
                     if status["health"] < BATTERY_OK:
@@ -217,7 +223,7 @@ def main():
                         os.system(SHUTDOWN_CMD)
                         sys.exit(1)
                 if "time to empty" in status:
-                    log.info("Remaining time = %d%", status["time to empty"])
+                    log.info("Remaining time = %d", status["time to empty"])
                     if status["time to empty"] < EMPTY_OK:
                         log.info("Battery runtime estimate is at %d, shutting down.", status["time to empty"])
                         os.system(SHUTDOWN_CMD)
