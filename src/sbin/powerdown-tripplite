@@ -201,6 +201,7 @@ def main():
 
     ups = Battery(args.product_id)
     log.info("Starting UPS monitoring of 0x%04x:0x%04x - logs in %s", VENDOR_ID, ups.product_id, args.log)
+    ups.open()
 
     while True:
         status = ups.get()
